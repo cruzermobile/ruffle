@@ -1,0 +1,117 @@
+name: Build custom Ruffle web
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_dual_wasm:
+        description: "Build both modern WASM and MVP fallback WASM"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      cargo_features:
+        description: "Extra Cargo features, comma-separated. Example: jpegxr"
+        required: false
+        default: ""
+        type: string
+      node_version:
+        description: "Node.js version"
+        required: true
+        default: "24"
+        type: choice
+        options:
+          - "24"
+          - "25"
+
+permissions:
+  contents: read
+
+jobs:
+  build-web:
+    name: Build web selfhosted package
+    runs-on: ubuntu-latest
+
+    env:
+      CARGO_TERM_COLOR: always
+      BUILD_WASM_MVP: ${{ inputs.build_dual_wasm }}
+      CARGO_FEATURES: ${{ inputs.cargo_features }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rust-src
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libudev-dev g++ binaryen
+
+      - name: Install wasm-bindgen CLI
+        run: |
+          cargo install wasm-bindgen-cli --version 0.2.120 --locked
+
+      - name: Install web dependencies
+        working-directory: web
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Build Ruffle web packages
+        working-directory: web
+        run: |
+          npm run build
+
+      - name: Collect selfhosted dist metadata
+        run: |
+          mkdir -p build-report
+          find web/packages/selfhosted/dist -maxdepth 2 -type f -print | sort > build-report/selfhosted-files.txt
+          du -ah web/packages/selfhosted/dist | sort -h > build-report/selfhosted-sizes.txt
+          sha256sum web/packages/selfhosted/dist/* > build-report/selfhosted-sha256.txt
+
+      - name: Print build report
+        run: |
+          echo "=== Files ==="
+          cat build-report/selfhosted-files.txt
+          echo
+          echo "=== Sizes ==="
+          cat build-report/selfhosted-sizes.txt
+          echo
+          echo "=== SHA-256 ==="
+          cat build-report/selfhosted-sha256.txt
+
+      - name: Upload selfhosted package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ruffle-web-selfhosted-custom
+          path: |
+            web/packages/selfhosted/dist
+            build-report
